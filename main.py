@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-print("🔥 SUDEEP BOT - DEBUG MODE 🔥")
+print("🔥 SUDEEP AI - ULTIMATE FIX 🔥")
 
 # --- CONFIG ---
 API_ID = int(os.getenv("API_ID"))
@@ -20,135 +20,178 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # --- CLIENT ---
 app = Client(
-    "sudeep_debug",
+    "sudeep_final",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
     in_memory=True
 )
 
-# --- DB ---
-mongo = AsyncIOMotorClient(MONGO_URL)
-db = mongo.sudeep_ai
-msgs = db.messages
-status_db = db.status
+# --- SIMPLE IN-MEMORY STATUS ---
+AI_ACTIVE = False
+MY_USER_ID = None  # Tumhara user ID store karenge
 
 # --- GEMINI ---
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- SIMPLE STATUS ---
-AI_MODE = False  # In-memory status
+# --- 1. GET MY USER ID ON START ---
+@app.on_message(filters.me)
+async def get_my_id(client, message):
+    """Pehle message se apna ID le lo"""
+    global MY_USER_ID
+    if message.from_user:
+        MY_USER_ID = message.from_user.id
+        print(f"✅ My User ID: {MY_USER_ID}")
 
-# --- 1. ALL MESSAGES CATCHER (DEBUG) ---
-@app.on_message(filters.all)
-async def catch_all(client, message):
-    """Saare messages log karo debugging ke liye"""
+# --- 2. AI CONTROL COMMAND ---
+@app.on_message(filters.me & filters.text)
+async def handle_commands(client, message):
+    """Handle .ai commands"""
+    global AI_ACTIVE
     
-    # Message info
-    sender = "ME" if message.from_user and message.from_user.is_self else "OTHER"
-    chat_type = "PRIVATE" if message.chat.type == enums.ChatType.PRIVATE else "GROUP"
-    
-    print(f"\n📥 [{chat_type}] [{sender}] >> {message.text if message.text else '[Media/Sticker]'}")
-    
-    # Agar maine bheja hai
-    if message.from_user and message.from_user.is_self:
-        print(f"   🎯 THIS IS MY MESSAGE!")
+    if message.text.startswith('.'):
+        print(f"\n🎮 COMMAND: {message.text}")
         
-        # Command check
-        if message.text and message.text.startswith('.'):
-            print(f"   💻 DETECTED COMMAND: {message.text}")
+        if message.text.lower().startswith('.ai'):
+            parts = message.text.lower().split()
             
-            # .ai on/off handle
-            if message.text.lower().startswith('.ai'):
-                parts = message.text.lower().split()
-                if len(parts) > 1:
-                    cmd = parts[1]
-                    
-                    global AI_MODE
-                    if cmd == "on":
-                        AI_MODE = True
-                        print("   🟢 AI MODE SET TO: ON")
-                        await message.edit("✅ **AI GHOST ACTIVATED!**\n\nAb mai teri jagah baat karunga. Koi message bhejo test karne ke liye!")
-                        
-                    elif cmd == "off":
-                        AI_MODE = False
-                        print("   🔴 AI MODE SET TO: OFF")
-                        await message.edit("❌ **AI GHOST DEACTIVATED**")
-                        
-                    elif cmd == "status":
-                        await message.edit(f"🤖 **AI Status:** {'🟢 ON' if AI_MODE else '🔴 OFF'}")
-                        
-                    elif cmd == "test":
-                        await message.reply_text("Test reply from AI!")
+            if len(parts) > 1:
+                cmd = parts[1]
+                
+                if cmd == "on":
+                    AI_ACTIVE = True
+                    print("🟢 AI MODE: ON")
+                    await message.edit("""
+✅ **AI GHOST ACTIVATED!**
 
-# --- 2. AUTO REPLY (WORKING VERSION) ---
-@app.on_message(
-    ~filters.me & 
-    ~filters.bot & 
-    filters.private  # Temporary: Sirf DMs mein reply karo
-)
-async def auto_reply_simple(client, message):
-    """Sirf DMs ka reply karo"""
+Ab mai teri jagah reply karunga jab:
+1. Koi tumhe DM karega
+2. Koi tumhe group mein tag karega
+3. Koi tumhare message pe reply karega
+
+**Test karne ke liye:** Kisi friend ko bolo tumhe "Hi" bhejne! 🤖
+                    """)
+                    
+                elif cmd == "off":
+                    AI_ACTIVE = False
+                    print("🔴 AI MODE: OFF")
+                    await message.edit("❌ **AI GHOST DEACTIVATED**")
+                    
+                elif cmd == "status":
+                    status_msg = "🟢 **AI STATUS: ON**" if AI_ACTIVE else "🔴 **AI STATUS: OFF**"
+                    await message.edit(status_msg)
+                    
+                elif cmd == "test":
+                    # Test reply
+                    await message.reply_text("🤖 Test successful! AI is working.")
+
+# --- 3. AUTO REPLY (PERFECTED) ---
+@app.on_message()
+async def handle_all_messages(client, message):
+    """Saare messages handle karo"""
+    global AI_ACTIVE, MY_USER_ID
     
-    print(f"\n💌 DM from {message.from_user.first_name}: {message.text[:50] if message.text else '[Media]'}")
-    print(f"   AI MODE: {'ON' if AI_MODE else 'OFF'}")
+    # Skip bots and service messages
+    if message.from_user and message.from_user.is_bot:
+        return
     
-    if not AI_MODE:
+    # Debug info
+    sender_name = message.from_user.first_name if message.from_user else "Unknown"
+    chat_type = "DM" if message.chat.type == enums.ChatType.PRIVATE else "GROUP"
+    
+    print(f"\n📨 [{chat_type}] {sender_name}: {message.text[:40] if message.text else '[Media]'}")
+    
+    # CASE 1: Agar yeh message TUMNE bheja hai (commands handle)
+    if message.from_user and message.from_user.is_self:
+        print("   👤 This is MY message")
+        # Commands already handled above
+        return
+    
+    # CASE 2: Agar yeh incoming message hai
+    print(f"   🤖 AI Status: {'ON' if AI_ACTIVE else 'OFF'}")
+    
+    if not AI_ACTIVE:
         print("   ❌ AI is OFF, ignoring...")
         return
     
-    # Typing show karo
+    # Check if message is for us
+    should_reply = False
+    
+    # Rule 1: Direct DM
+    if message.chat.type == enums.ChatType.PRIVATE:
+        should_reply = True
+        print("   💌 This is a DM, will reply")
+    
+    # Rule 2: Group mention
+    elif message.mentioned:
+        should_reply = True
+        print("   📢 Mentioned in group, will reply")
+    
+    # Rule 3: Reply to our message
+    elif message.reply_to_message:
+        if (message.reply_to_message.from_user and 
+            message.reply_to_message.from_user.is_self):
+            should_reply = True
+            print("   ↩️ Replying to my message, will reply")
+    
+    if not should_reply:
+        print("   ⏭️ Not relevant, skipping...")
+        return
+    
+    # --- GENERATE REPLY ---
+    print("   ⏳ Generating AI reply...")
     await client.send_chat_action(message.chat.id, enums.ChatAction.TYPING)
     
     # Simple prompt
-    sender = message.from_user.first_name if message.from_user else "Bhai"
-    msg = message.text or "Kuch bheja hai"
+    msg_text = message.text or "Kuch bheja hai"
     
-    prompt = f"""Reply as Sudeep would on WhatsApp.
+    prompt = f"""You are Sudeep. You're replying to a message.
 
-{sender} ne message bheja: "{msg}"
+Message: "{msg_text}"
 
-Sudeep ka reply (1-2 lines, Hinglish mein, casual):"""
+Reply as Sudeep (young Indian guy):
+- Use casual Hinglish (Hindi+English mix)
+- 1-2 sentences only
+- Sound natural like WhatsApp chat
+- Examples: "Arey yaar!", "Sahi hai bhai", "Kya haal hai?"
+
+Sudeep's reply:"""
     
     try:
-        print("   🤖 Generating reply...")
         response = model.generate_content(prompt)
-        reply = response.text.strip() if response.text else "Arey, baad mein baat karte hain."
+        reply_text = response.text.strip() if response.text else ""
         
         # Clean
-        reply = re.sub(r'\*|\#', '', reply)
-        reply = re.sub(r'\n', ' ', reply).strip()
+        if not reply_text:
+            reply_text = "Arey, baad mein baat karte hain."
         
-        if len(reply) < 3:
-            reply = "Hmm... okay."
+        reply_text = re.sub(r'\*|#|`', '', reply_text)
+        reply_text = re.sub(r'\n+', ' ', reply_text).strip()
         
-        print(f"   💭 Reply: {reply}")
+        print(f"   💭 AI Reply: {reply_text[:60]}...")
         
-        # Delay
-        await asyncio.sleep(1)
+        # Small delay
+        await asyncio.sleep(1.5)
         
-        # Send
-        await message.reply_text(reply)
-        print("   ✅ Reply sent!")
+        # Send reply
+        await message.reply_text(reply_text)
+        print("   ✅ Reply sent successfully!")
         
     except Exception as e:
         print(f"   ❌ Error: {e}")
-        await message.reply_text("Arey, baad mein baat karte hain yaar.")
+        await message.reply_text("Hmm... thodi der mein baat karte hain.")
 
-# --- BOT START ---
+# --- STARTUP INFO ---
 print("\n" + "="*60)
-print("🤖 **SUDEEP AI BOT - DEBUG VERSION**")
+print("🤖 **SUDEEP AI GHOST BOT - READY**")
 print("="*60)
-print("\n📱 **TELEGRAM MEIN KARO YE STEPS:**")
-print("1. Kisi bhi chat mein type karo: `.ai on`")
-print("2. Console pe 'AI MODE SET TO: ON' dikhega")
-print("3. Kisi friend ko bolo tumhe DM kare")
-print("4. AI reply karega")
-print("\n🔄 **Testing:**")
-print("- `.ai on` -> Activate")
-print("- `.ai off` -> Deactivate")
-print("- `.ai status` -> Check")
+print("\n📱 **TELEGRAM MEIN FOLLOW KARO:**")
+print("1. Type: .ai on")
+print("2. Wait for confirmation message")
+print("3. Ask a FRIEND to message you (NOT yourself)")
+print("4. AI will reply to their message")
+print("\n⚠️ **IMPORTANT:** Friend se message bhejwao, khud se nahi!")
 print("="*60 + "\n")
 
 if __name__ == "__main__":
