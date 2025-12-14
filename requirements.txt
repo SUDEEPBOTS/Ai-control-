@@ -1,0 +1,5 @@
+pyrogram
+tgcrypto
+motor
+google-generativeai
+python-dotenv
