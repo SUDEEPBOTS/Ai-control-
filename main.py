@@ -22,7 +22,7 @@ msg_collection = db["user_messages"]
 status_collection = db["bot_status"] # AI Mode ka status save karne ke liye
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- HELPERS ---
 
