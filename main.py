@@ -1,7 +1,7 @@
 import os
 import re
-import sys
 import asyncio
+import random
 from pyrogram import Client, filters, enums
 from motor.motor_asyncio import AsyncIOMotorClient
 import google.generativeai as genai
@@ -10,17 +10,13 @@ from dotenv import load_dotenv
 # ================= LOAD ENV =================
 load_dotenv()
 
-try:
-    API_ID = int(os.getenv("API_ID"))
-    API_HASH = os.getenv("API_HASH")
-    SESSION_STRING = os.getenv("SESSION_STRING")
-    MONGO_URL = os.getenv("MONGO_URL")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-except Exception as e:
-    print("❌ ENV ERROR:", e)
-    sys.exit(1)
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
+MONGO_URL = os.getenv("MONGO_URL")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ================= PYROGRAM =================
+# ================= CLIENT =================
 app = Client(
     "sudeep_clone",
     api_id=API_ID,
@@ -31,52 +27,48 @@ app = Client(
 # ================= DB =================
 mongo = AsyncIOMotorClient(MONGO_URL)
 db = mongo["sudeep_clone"]
-state_col = db["state"]
 style_col = db["style"]
+state_col = db["state"]
 
 # ================= GEMINI =================
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
 # ================= HELPERS =================
-async def is_ai_on():
-    d = await state_col.find_one({"_id": "ai"})
-    return d["on"] if d else False
+async def get_state():
+    d = await state_col.find_one({"_id": "main"})
+    return d["active"] if d else False
 
-async def set_ai(on: bool):
+async def set_state(val: bool):
     await state_col.update_one(
-        {"_id": "ai"},
-        {"$set": {"on": on}},
+        {"_id": "main"},
+        {"$set": {"active": val}},
         upsert=True
     )
 
-async def save_style(text):
-    await style_col.insert_one({"text": text})
-
 async def get_style():
-    cur = style_col.find({}).sort("_id", -1).limit(25)
-    data = await cur.to_list(25)
+    cur = style_col.find({}).sort("_id", -1).limit(30)
+    data = await cur.to_list(30)
     return "\n".join(d["text"] for d in data) if data else "Casual Hinglish."
 
-# ================= STYLE LEARN =================
+# ================= SAVE STYLE =================
 @app.on_message(filters.outgoing)
 async def learn(_, m):
     if m.text and not m.text.startswith("."):
-        await save_style(m.text)
+        await style_col.insert_one({"text": m.text})
 
 # ================= AI ON / OFF =================
 @app.on_message(
     filters.outgoing &
-    filters.regex(r"^\.ai\s+(on|off)$", flags=re.IGNORECASE)
+    filters.regex(r"^\.ai\s+(on|off)$", flags=re.I)
 )
 async def ai_toggle(_, m):
     cmd = m.text.split()[-1].lower()
-
     if cmd == "on":
-        await set_ai(True)
+        await set_state(True)
         await m.edit("🟢 AI ON")
     else:
-        await set_ai(False)
+        await set_state(False)
         await m.edit("🔴 AI OFF")
 
 # ================= AUTO REPLY =================
@@ -87,55 +79,49 @@ async def ai_toggle(_, m):
     (filters.private | filters.mentioned | filters.reply)
 )
 async def auto_reply(client, m):
-    if not await is_ai_on():
+    if not await get_state():
         return
 
     if m.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        if not (m.mentioned or (m.reply_to_message and m.reply_to_message.from_user.is_self)):
+        if not (m.mentioned or
+                (m.reply_to_message and m.reply_to_message.from_user.is_self)):
             return
 
     await client.send_chat_action(m.chat.id, enums.ChatAction.TYPING)
 
-    style = await get_style()
-    text = m.text or "Reply naturally."
-
     prompt = f"""
 You are Sudeep.
-You are a real human.
+You are a real human, not AI.
 
-Style:
-{style}
+My chat style:
+{await get_style()}
 
 Message:
-{text}
+{m.text}
 
 Rules:
 - Hinglish
 - Short
 - Natural
-- No AI mention
-
-Reply:
+- Human mistakes allowed
 """
 
     try:
         res = model.generate_content(prompt)
-        await asyncio.sleep(2)
+        await asyncio.sleep(random.randint(2, 4))
         await m.reply_text(res.text.strip())
-    except Exception as e:
-        print("Gemini error:", e)
+    except:
+        await m.reply_text("hmm")
 
-# ================= MAIN =================
-async def main():
-    await app.start()
+# ================= START MESSAGE =================
+@app.on_message(filters.me & filters.private)
+async def first_boot(_, m):
+    if m.text == ".__boot__":
+        await m.reply("save")
 
-    # ✅ STARTUP MESSAGE (Saved Messages)
-    try:
-        await app.send_message("me", "save")
-    except Exception as e:
-        print("Startup message failed:", e)
+# ================= RUN =================
+print("🚀 AI CLONE USERBOT STARTED")
 
-    print("🚀 AI CLONE USERBOT STARTED")
-    await app.idle()
-
-app.run(main())
+with app:
+    app.send_message("me", "save")
+    app.run()
