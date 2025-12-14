@@ -1,133 +1,153 @@
-import os
-import asyncio
-import sys
-import re
+import os, sys, re, asyncio, random
 from pyrogram import Client, filters, enums
 from motor.motor_asyncio import AsyncIOMotorClient
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# ================== LOAD ENV ==================
+# ================= LOAD ENV =================
 load_dotenv()
 
-try:
-    API_ID = int(os.getenv("API_ID"))
-    API_HASH = os.getenv("API_HASH")
-    SESSION_STRING = os.getenv("SESSION_STRING")
-    MONGO_URL = os.getenv("MONGO_URL")
-    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-except Exception:
-    print("❌ ENV missing or API_ID not int")
-    sys.exit(1)
+API_ID = int(os.getenv("API_ID"))
+API_HASH = os.getenv("API_HASH")
+SESSION_STRING = os.getenv("SESSION_STRING")
+MONGO_URL = os.getenv("MONGO_URL")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ================== PYROGRAM ==================
+# ================= CLIENT =================
 app = Client(
-    "ai_clone_userbot",
+    "sudeep_ai_clone",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING
 )
 
-# ================== MONGO ==================
+# ================= DATABASE =================
 mongo = AsyncIOMotorClient(MONGO_URL)
-db = mongo["my_digital_clone"]
-msg_collection = db["user_messages"]
-status_collection = db["bot_status"]
+db = mongo["sudeep_clone"]
 
-# ================== GEMINI ==================
+style_col = db["style"]
+state_col = db["state"]
+
+# ================= GEMINI =================
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
-# ================== DB HELPERS ==================
-async def get_ai_status():
-    doc = await status_collection.find_one({"_id": "main"})
-    return doc["active"] if doc else False
+# ================= HELPERS =================
+async def get_state():
+    d = await state_col.find_one({"_id": "main"})
+    return d["active"] if d else False
 
-async def set_ai_status(active: bool):
-    await status_collection.update_one(
+async def set_state(val: bool):
+    await state_col.update_one(
         {"_id": "main"},
-        {"$set": {"active": active}},
+        {"$set": {"active": val}},
         upsert=True
     )
 
-async def get_my_style():
-    cursor = msg_collection.find({}).sort("_id", -1).limit(25)
-    msgs = await cursor.to_list(length=25)
-    if not msgs:
-        return "Speak casually in Hinglish, short replies."
-    return "\n".join(m["text"] for m in msgs if "text" in m)
+async def save_style(text):
+    await style_col.insert_one({"text": text})
 
-# ================== LEARN STYLE ==================
-@app.on_message(filters.outgoing & ~filters.command(["ai"]))
-async def learn_handler(_, message):
-    if message.text and not message.text.startswith("."):
-        await msg_collection.insert_one({"text": message.text})
+async def get_style():
+    cur = style_col.find({}).sort("_id", -1).limit(25)
+    data = await cur.to_list(25)
+    if not data:
+        return "Casual Hinglish, short replies."
+    return "\n".join(d["text"] for d in data)
 
-# ================== AI ON / OFF ==================
+def clean_reply(text):
+    banned = ["ai", "assistant", "bot", "language model"]
+    for b in banned:
+        text = re.sub(b, "", text, flags=re.I)
+    return text.strip()
+
+def fallback():
+    return random.choice([
+        "acha",
+        "hmm",
+        "dekhte hai",
+        "haan",
+        "thik hai"
+    ])
+
+# ================= ON START =================
+@app.on_startup()
+async def startup(client):
+    await client.send_message(
+        "me",
+        "✅ **Sudeep AI Clone Started**"
+    )
+
+# ================= LEARN STYLE =================
+@app.on_message(filters.outgoing)
+async def learn(_, m):
+    if m.text and not m.text.startswith("."):
+        await save_style(m.text)
+
+# ================= AI COMMAND =================
 @app.on_message(
     filters.outgoing &
-    filters.regex(r"^\.ai\s+(on|off)$", flags=re.IGNORECASE)
+    filters.regex(r"^\.ai[\s_]*(on|off)$", re.I)
 )
-async def ai_toggle(_, message):
-    cmd = message.text.split()[-1].lower()
-    print("AI TOGGLE:", cmd)
+async def ai_toggle(_, m):
+    cmd = re.search(r"(on|off)", m.text, re.I).group(1).lower()
+    print("AI COMMAND:", cmd)
 
     if cmd == "on":
-        await set_ai_status(True)
-        await message.edit("🟢 **AI Ghost Mode ON**")
+        await set_state(True)
+        await m.edit("🟢 AI ON")
     else:
-        await set_ai_status(False)
-        await message.edit("🔴 **AI Ghost Mode OFF**")
+        await set_state(False)
+        await m.edit("🔴 AI OFF")
 
-# ================== AUTO REPLY ==================
+# ================= AUTO REPLY =================
 @app.on_message(
     ~filters.outgoing &
     ~filters.bot &
     ~filters.service &
     (filters.private | filters.mentioned | filters.reply)
 )
-async def auto_reply(client, message):
-    if not await get_ai_status():
+async def auto_reply(client, m):
+    if not await get_state():
         return
 
-    # group safety
-    if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        if not (message.mentioned or
-                (message.reply_to_message and
-                 message.reply_to_message.from_user and
-                 message.reply_to_message.from_user.is_self)):
+    if m.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        if not (m.mentioned or
+                (m.reply_to_message and m.reply_to_message.from_user.is_self)):
             return
 
-    await client.send_chat_action(message.chat.id, enums.ChatAction.TYPING)
+    await client.send_chat_action(m.chat.id, enums.ChatAction.TYPING)
 
-    style = await get_my_style()
-    text = message.text or "Reply naturally to this message."
-    name = message.from_user.first_name if message.from_user else "Someone"
+    text = m.text or "Reply naturally"
+    style = await get_style()
 
     prompt = f"""
-You are ME.
-Reply exactly like my style.
+You are Sudeep.
+You are a real human, not an AI.
 
-PAST STYLE:
+Talking style:
 {style}
 
-User ({name}) said:
+Message:
 {text}
 
 Rules:
-- Hinglish / Hindi
-- 1–2 lines
-- Casual
-- No AI mention
+- Hinglish
+- Short
+- Natural
+- Human vibe
+- No AI words
+
+Reply:
 """
 
     try:
         res = model.generate_content(prompt)
-        await asyncio.sleep(2)
-        await message.reply_text(res.text.strip())
-    except Exception as e:
-        print("Gemini Error:", e)
+        await asyncio.sleep(random.randint(2, 5))
+        reply = clean_reply(res.text)
+        await m.reply_text(reply)
+    except:
+        await m.reply_text(fallback())
 
-# ================== START ==================
+# ================= START =================
 print("🚀 AI CLONE USERBOT STARTED")
 app.run()
