@@ -1,127 +1,150 @@
 import os
-import re
 import asyncio
-import random
 from pyrogram import Client, filters, enums
 from motor.motor_asyncio import AsyncIOMotorClient
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-# ================= LOAD ENV =================
 load_dotenv()
 
+# --- CONFIG ---
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 SESSION_STRING = os.getenv("SESSION_STRING")
 MONGO_URL = os.getenv("MONGO_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# ================= CLIENT =================
-app = Client(
-    "sudeep_clone",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING
-)
+# --- SETUP ---
+app = Client("my_clone_bot", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_STRING)
+mongo_client = AsyncIOMotorClient(MONGO_URL)
+db = mongo_client["my_digital_clone"]
+msg_collection = db["user_messages"]
+status_collection = db["bot_status"] # AI Mode ka status save karne ke liye
 
-# ================= DB =================
-mongo = AsyncIOMotorClient(MONGO_URL)
-db = mongo["sudeep_clone"]
-style_col = db["style"]
-state_col = db["state"]
-
-# ================= GEMINI =================
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.5-flash")
+model = genai.GenerativeModel('gemini-2.5-flash')
 
-# ================= HELPERS =================
-async def get_state():
-    d = await state_col.find_one({"_id": "main"})
-    return d["active"] if d else False
+# --- HELPERS ---
 
-async def set_state(val: bool):
-    await state_col.update_one(
-        {"_id": "main"},
-        {"$set": {"active": val}},
+async def get_ai_status():
+    # Check karo ki AI mode ON hai ya OFF (Database se, taaki restart hone par bhi yaad rahe)
+    status = await status_collection.find_one({"_id": "main_status"})
+    return status.get("active", False) if status else False
+
+async def set_ai_status(active: bool):
+    await status_collection.update_one(
+        {"_id": "main_status"}, 
+        {"$set": {"active": active}}, 
         upsert=True
     )
 
-async def get_style():
-    cur = style_col.find({}).sort("_id", -1).limit(30)
-    data = await cur.to_list(30)
-    return "\n".join(d["text"] for d in data) if data else "Casual Hinglish."
+async def get_my_style():
+    # Tumhare last 30 messages uthayega style copy karne ke liye
+    cursor = msg_collection.find({}).sort("_id", -1).limit(30)
+    messages = await cursor.to_list(length=30)
+    if not messages:
+        return "Speak casually in Hinglish."
+    return "\n".join([m['text'] for m in messages if 'text' in m])
 
-# ================= SAVE STYLE =================
-@app.on_message(filters.outgoing)
-async def learn(_, m):
-    if m.text and not m.text.startswith("."):
-        await style_col.insert_one({"text": m.text})
+# --- 1. LEARNING (Messages Save Karna) ---
+@app.on_message(filters.me & ~filters.service)
+async def learn_handler(client, message):
+    if message.text and not message.text.startswith("."): # Commands save mat karna
+        await msg_collection.insert_one({
+            "text": message.text,
+            "date": message.date
+        })
 
-# ================= AI ON / OFF =================
-@app.on_message(
-    filters.outgoing &
-    filters.regex(r"^\.ai\s+(on|off)$", flags=re.I)
-)
-async def ai_toggle(_, m):
-    cmd = m.text.split()[-1].lower()
-    if cmd == "on":
-        await set_state(True)
-        await m.edit("🟢 AI ON")
-    else:
-        await set_state(False)
-        await m.edit("🔴 AI OFF")
-
-# ================= AUTO REPLY =================
-@app.on_message(
-    ~filters.outgoing &
-    ~filters.bot &
-    ~filters.service &
-    (filters.private | filters.mentioned | filters.reply)
-)
-async def auto_reply(client, m):
-    if not await get_state():
+# --- 2. CONTROLS (.ai on / .ai off) ---
+@app.on_message(filters.me & filters.command("ai", prefixes="."))
+async def mode_handler(client, message):
+    if len(message.command) < 2:
+        await message.edit("❌ **Usage:** `.ai on` or `.ai off`")
         return
 
-    if m.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
-        if not (m.mentioned or
-                (m.reply_to_message and m.reply_to_message.from_user.is_self)):
-            return
+    cmd = message.command[1].lower()
+    
+    if cmd == "on":
+        await set_ai_status(True)
+        await message.edit("🟢 **AI Ghost Mode: ACTIVATED**\nAb mai tumhari jagah reply karunga.")
+    elif cmd == "off":
+        await set_ai_status(False)
+        await message.edit("🔴 **AI Ghost Mode: DEACTIVATED**\nWelcome back.")
+    else:
+        await message.edit("❌ Sirf `on` ya `off` use karein.")
 
-    await client.send_chat_action(m.chat.id, enums.ChatAction.TYPING)
+# --- 3. AUTO REPLY HANDLER ---
+# Logic: Incoming message ho, jo user (tum) ne na bheja ho.
+# Groups me: Sirf Mention ya Reply hone par trigger ho.
+# Private me: Sab messages par trigger ho.
+@app.on_message(
+    ~filters.me & ~filters.bot & ~filters.service & 
+    (filters.private | filters.mentioned | filters.reply)
+)
+async def auto_reply(client, message):
+    # Sabse pehle check karo AI ON hai ya nahi
+    is_active = await get_ai_status()
+    if not is_active:
+        return
 
+    # Group Protection: Agar group hai, toh check karo ki reply tumhare message pe hai ya tumhe tag kiya hai
+    if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+        is_relevant = False
+        if message.mentioned: # Tumhara username tag kiya
+            is_relevant = True
+        elif message.reply_to_message and message.reply_to_message.from_user.is_self: # Tumhare msg pe reply kiya
+            is_relevant = True
+        
+        if not is_relevant:
+            return # Agar bas group me baat chal rahi hai aur tum involved nahi ho, toh ignore.
+
+    # --- ACTION ---
+    await client.send_chat_action(message.chat.id, enums.ChatAction.TYPING)
+    
+    # 1. Tumhara style load karo
+    my_style = await get_my_style()
+    
+    # 2. Incoming text
+    incoming = message.text or "[Media/Sticker]"
+    sender_name = message.from_user.first_name if message.from_user else "Unknown"
+
+    # 3. Prompt
     prompt = f"""
-You are Sudeep.
-You are a real human, not AI.
-
-My chat style:
-{await get_style()}
-
-Message:
-{m.text}
-
-Rules:
-- Hinglish
-- Short
-- Natural
-- Human mistakes allowed
-"""
-
+    You are roleplaying as ME (The user). You are currently offline, handling chats via AI.
+    
+    **My Past Messages (Copy this style, tone, and language):**
+    {my_style}
+    
+    **Context:**
+    - I am currently away.
+    - User '{sender_name}' sent: "{incoming}"
+    
+    **Instructions:**
+    - Reply exactly like I would.
+    - If it's a casual greeting, reply casually.
+    - If it's urgent, say I'll be back soon (but in my style).
+    - Keep it short (1-2 sentences).
+    - Use Hinglish/Hindi as per my past messages.
+    
+    **Reply:**
+    """
+    
     try:
-        res = model.generate_content(prompt)
-        await asyncio.sleep(random.randint(2, 4))
-        await m.reply_text(res.text.strip())
-    except:
-        await m.reply_text("hmm")
+        response = model.generate_content(prompt)
+        reply_text = response.text.strip()
+        
+        await asyncio.sleep(2) # Human delay
+        
+        if message.chat.type in [enums.ChatType.GROUP, enums.ChatType.SUPERGROUP]:
+            # Group me reply karke (quote karke) bhejo
+            await message.reply_text(reply_text)
+        else:
+            # DM me normal bhejo
+            await message.reply_text(reply_text)
+            
+    except Exception as e:
+        print(f"AI Error: {e}")
 
-# ================= START MESSAGE =================
-@app.on_message(filters.me & filters.private)
-async def first_boot(_, m):
-    if m.text == ".__boot__":
-        await m.reply("save")
-
-# ================= RUN =================
-print("🚀 AI CLONE USERBOT STARTED")
-
-with app:
-    app.send_message("me", "save")
-    app.run()
+print("🔥 Bot Started. Use .ai on to activate.")
+app.run()
+  
