@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sys
+import re # Command handling ke liye naya import
 from pyrogram import Client, filters, enums
 from motor.motor_asyncio import AsyncIOMotorClient
 import google.generativeai as genai
@@ -10,12 +11,17 @@ from dotenv import load_dotenv
 # Environment Variables Load
 load_dotenv()
 
-# --- CONFIGURATION (Ensure these are set in Railway Variables) ---
-API_ID = int(os.getenv("API_ID"))
-API_HASH = os.getenv("API_HASH")
-SESSION_STRING = os.getenv("SESSION_STRING")
-MONGO_URL = os.getenv("MONGO_URL")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# --- CONFIGURATION ---
+try:
+    API_ID = int(os.getenv("API_ID"))
+    API_HASH = os.getenv("API_HASH")
+    SESSION_STRING = os.getenv("SESSION_STRING")
+    MONGO_URL = os.getenv("MONGO_URL")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+except Exception:
+    print("\n\n🚨 CRITICAL ERROR: Environment Variables are missing or API_ID is not an integer! 🚨")
+    sys.exit(1)
+
 
 # --- 1. PYROGRAM CLIENT SETUP WITH ERROR CHECKING ---
 try:
@@ -27,12 +33,11 @@ except Exception as e:
     print("\n\n🚨 CRITICAL ERROR 1: PYROGRAM CLIENT SETUP FAILED 🚨")
     print(f"Error: {e}")
     print("FIX: API_ID, API_HASH, ya SESSION_STRING check karein. Session string naya generate karein.")
-    sys.exit(1) # Stop deployment
+    sys.exit(1) 
 
 # --- 2. MONGO DB SETUP WITH ERROR CHECKING ---
 try:
     print("STATUS: MongoDB connection check kar raha hai...")
-    # Add serverSelectionTimeoutMS for quick fail on connection error
     mongo_client = AsyncIOMotorClient(MONGO_URL, serverSelectionTimeoutMS=5000) 
     
     # Quick check to ensure connection is valid
@@ -49,11 +54,10 @@ except Exception as e:
     sys.exit(1)
 
 
-# --- 3. GEMINI SETUP WITH ERROR CHECKING AND FIX ---
+# --- 3. GEMINI SETUP WITH ERROR CHECKING ---
 try:
     print("STATUS: Gemini API key check kar raha hai...")
     genai.configure(api_key=GEMINI_API_KEY)
-    # Using the specified model
     model = genai.GenerativeModel('gemini-2.5-flash')
     
     # Simple check to ensure API key is valid (Fix for GenerateContentConfig error)
@@ -103,23 +107,28 @@ async def learn_handler(client, message):
         })
 
 # --- 5. CONTROLS (.ai on / .ai off) ---
-@app.on_message(filters.me & filters.command("ai", prefixes="."))
+# Filters.regex ka use kiya hai reliability badhane ke liye
+@app.on_message(filters.me & filters.regex(r"^\.ai\s+(on|off)$", flags=re.IGNORECASE))
 async def mode_handler(client, message):
     """Toggles the AI Ghost Mode."""
-    if len(message.command) < 2:
+    
+    # regex se command ka part nikalna
+    match = re.search(r"^\.ai\s+(on|off)$", message.text, re.IGNORECASE)
+    
+    # Agar match nahi hua toh (safety check)
+    if not match:
         await message.edit("❌ **Usage:** `.ai on` or `.ai off`")
         return
-
-    cmd = message.command[1].lower()
+    
+    cmd = match.group(1).lower() # 'on' ya 'off'
     
     if cmd == "on":
         await set_ai_status(True)
+        # Edit the message to show activation status
         await message.edit("🟢 **AI Ghost Mode: ACTIVATED**\nAb mai tumhari jagah reply karunga.")
     elif cmd == "off":
         await set_ai_status(False)
         await message.edit("🔴 **AI Ghost Mode: DEACTIVATED**\nWelcome back.")
-    else:
-        await message.edit("❌ Sirf `on` ya `off` use karein.")
 
 # --- 6. AUTO REPLY HANDLER ---
 @app.on_message(
@@ -137,6 +146,7 @@ async def auto_reply(client, message):
         is_relevant = False
         if message.mentioned:
             is_relevant = True
+        # Check if the reply is to 'self' (the userbot)
         elif message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.is_self:
             is_relevant = True
         
@@ -191,10 +201,9 @@ try:
     print("STATUS: Pyrogram listener shuru...")
     app.run()
     
-# Agar Pyrogram chalu hone ke baad turant ruk jaye (most likely Session String ka error)
+# Agar Pyrogram chalu hone ke baad turant ruk jaye
 except Exception as e: 
     print("\n\n🚨 CRITICAL ERROR 4: PYROGRAM RUNTIME FAILED 🚨")
     print(f"Error: {e}")
     print("FIX: Bot chalu hone ke baad turant band ho gaya. Session String ya API/HASH check karein.")
-
-
+    
